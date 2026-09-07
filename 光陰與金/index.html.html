@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<!-- 引入 Manifest 與主題顏色 -->
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#2563eb">
+
+<!-- iOS Apple 專用設定 (重要！) -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="日程收支">
+<link rel="apple-touch-icon" href="icon-192.png">
+
+<!-- 註冊 Service Worker 的 JS 腳本 (放於 <head> 或 <body> 均可) -->
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js')
+        .then(() => console.log('PWA Service Worker 註冊成功'))
+        .catch((err) => console.log('Service Worker 註冊失敗:', err));
+    });
+  }
+</script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>日程 + 日曆 + 收支計算器</title>
+    <style>
+        :root {
+            --primary-color: #2563eb;
+            --bg-color: #f8fafc;
+            --card-bg: #ffffff;
+            --text-color: #1e293b;
+            --border-color: #e2e8f0;
+            --danger-color: #ef4444;
+            --success-color: #10b981;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        body { background-color: var(--bg-color); color: var(--text-color); padding: 20px; }
+        
+        .container { max-width: 1000px; margin: 0 auto; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        @media (max-width: 768px) { .container { grid-template-columns: 1fr; } }
+
+        .card { background: var(--card-bg); border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); border: 1px solid var(--border-color); }
+        .full-width { grid-column: 1 / -1; }
+
+        h2 { font-size: 1.25rem; margin-bottom: 15px; color: var(--primary-color); display: flex; justify-content: space-between; align-items: center; }
+        
+        /* 日曆樣式 */
+        .calendar-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; text-align: center; }
+        .calendar-day-head { font-weight: bold; padding: 8px 0; color: #64748b; font-size: 0.9rem; }
+        .calendar-day { padding: 12px 0; border-radius: 8px; cursor: pointer; border: 1px solid transparent; transition: all 0.2s; font-size: 0.95rem; }
+        .calendar-day:hover { background-color: #eff6ff; }
+        .calendar-day.selected { background-color: var(--primary-color); color: white; font-weight: bold; }
+        .calendar-day.empty { cursor: default; }
+
+        /* 表單與輸入框 */
+        .form-group { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+        input, select, button { padding: 8px 12px; border: 1px solid var(--border-color); border-radius: 6px; font-size: 0.9rem; outline: none; }
+        input:focus, select:focus { border-color: var(--primary-color); }
+        button { background-color: var(--primary-color); color: white; border: none; cursor: pointer; font-weight: 500; }
+        button:hover { opacity: 0.9; }
+        button.danger { background-color: var(--danger-color); padding: 4px 8px; font-size: 0.8rem; }
+
+        /* 列表樣式 */
+        .item-list { list-style: none; max-height: 250px; overflow-y: auto; }
+        .item-row { display: flex; justify-content: space-between; align-items: center; padding: 10px; border-bottom: 1px solid var(--border-color); font-size: 0.9rem; }
+        .item-row:last-child { border-bottom: none; }
+        .item-time { color: #64748b; font-size: 0.85rem; margin-right: 8px; font-weight: 500; }
+        
+        .amount-income { color: var(--success-color); font-weight: bold; }
+        .amount-expense { color: var(--danger-color); font-weight: bold; }
+
+        /* 統計列 */
+        .summary-bar { display: flex; justify-content: space-around; background: #f1f5f9; padding: 12px; border-radius: 8px; margin-top: 15px; font-weight: bold; font-size: 0.95rem; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <!-- 1. 月曆視圖 -->
+    <div class="card full-width">
+        <div class="calendar-header">
+            <button onclick="changeMonth(-1)">&lt; 上個月</button>
+            <h2 id="month-year-display" style="margin:0;"></h2>
+            <button onclick="changeMonth(1)">下個月 &gt;</button>
+        </div>
+        <div class="calendar-grid" id="calendar-grid"></div>
+    </div>
+
+    <!-- 2. 當日日程表 (細緻至時分) -->
+    <div class="card">
+        <h2>
+            <span>📅 日程規劃</span>
+            <span id="selected-date-display-1" style="font-size:0.9rem; color:#64748b;"></span>
+        </h2>
+        
+        <div class="form-group">
+            <input type="time" id="schedule-start-time" required>
+            <span>至</span>
+            <input type="time" id="schedule-end-time" required>
+            <input type="text" id="schedule-title" placeholder="日程名稱 / 活動" style="flex:1;" required>
+            <button onclick="addSchedule()">新增</button>
+        </div>
+
+        <ul class="item-list" id="schedule-list"></ul>
+    </div>
+
+    <!-- 3. 當日收支計算器 (細緻至時分) -->
+    <div class="card">
+        <h2>
+            <span>💰 收支計算器</span>
+            <span id="selected-date-display-2" style="font-size:0.9rem; color:#64748b;"></span>
+        </h2>
+
+        <div class="form-group">
+            <input type="time" id="expense-time" required>
+            <select id="expense-type">
+                <option value="expense">支出</option>
+                <option value="income">收入</option>
+            </select>
+            <input type="number" id="expense-amount" placeholder="金額" style="width: 80px;" min="0" step="0.1" required>
+            <input type="text" id="expense-note" placeholder="備註 (如: 午餐)" style="flex:1;">
+            <button onclick="addExpense()">紀錄</button>
+        </div>
+
+        <ul class="item-list" id="expense-list"></ul>
+
+        <!-- 當日收支統計 -->
+        <div class="summary-bar">
+            <span>收入: <span id="total-income" class="amount-income">$0</span></span>
+            <span>支出: <span id="total-expense" class="amount-expense">$0</span></span>
+            <span>結餘: <span id="total-balance">$0</span></span>
+        </div>
+    </div>
+</div>
+
+<script>
+    // 全局狀態
+    let currentDate = new Date();
+    let selectedDateStr = formatDate(new Date());
+
+    // 本地儲存資料結構：
+    // schedules: { "YYYY-MM-DD": [ { id, startTime, endTime, title } ] }
+    // expenses:  { "YYYY-MM-DD": [ { id, time, type, amount, note } ] }
+    let db = {
+        schedules: JSON.parse(localStorage.getItem('app_schedules')) || {},
+        expenses: JSON.parse(localStorage.getItem('app_expenses')) || {}
+    };
+
+    function saveData() {
+        localStorage.setItem('app_schedules', JSON.stringify(db.schedules));
+        localStorage.setItem('app_expenses', JSON.stringify(db.expenses));
+    }
+
+    function formatDate(date) {
+        const y = date.getFullYear();
+        const m = String(date.getMonth() + 1).padStart(2, '0');
+        const d = String(date.getDate()).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+    }
+
+    function getCurrentTimeStr() {
+        const now = new Date();
+        return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    }
+
+    // 初始化與渲染
+    window.onload = () => {
+        document.getElementById('expense-time').value = getCurrentTimeStr();
+        document.getElementById('schedule-start-time').value = getCurrentTimeStr();
+        renderCalendar();
+        selectDate(selectedDateStr);
+    };
+
+    // 1. 日曆邏輯
+    function renderCalendar() {
+        const year = currentDate.getFullYear();
+        const month = currentDate.getMonth();
+        
+        document.getElementById('month-year-display').innerText = `${year}年 ${month + 1}月`;
+        
+        const grid = document.getElementById('calendar-grid');
+        grid.innerHTML = '';
+
+        const weekDays = ['日', '一', '二', '三', '四', '五', '六'];
+        weekDays.forEach(d => {
+            grid.innerHTML += `<div class="calendar-day-head">${d}</div>`;
+        });
+
+        const firstDay = new Date(year, month, 1).getDay();
+        const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+        for (let i = 0; i < firstDay; i++) {
+            grid.innerHTML += `<div class="calendar-day empty"></div>`;
+        }
+
+        for (let day = 1; day <= daysInMonth; day++) {
+            const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+            const isSelected = dateStr === selectedDateStr ? 'selected' : '';
+            grid.innerHTML += `<div class="calendar-day ${isSelected}" onclick="selectDate('${dateStr}')">${day}</div>`;
+        }
+    }
+
+    function changeMonth(delta) {
+        currentDate.setMonth(currentDate.getMonth() + delta);
+        renderCalendar();
+    }
+
+    function selectDate(dateStr) {
+        selectedDateStr = dateStr;
+        renderCalendar();
+        
+        document.getElementById('selected-date-display-1').innerText = `(${dateStr})`;
+        document.getElementById('selected-date-display-2').innerText = `(${dateStr})`;
+
+        renderSchedules();
+        renderExpenses();
+    }
+
+    // 2. 日程表邏輯
+    function addSchedule() {
+        const startTime = document.getElementById('schedule-start-time').value;
+        const endTime = document.getElementById('schedule-end-time').value;
+        const title = document.getElementById('schedule-title').value.trim();
+
+        if (!startTime || !title) {
+            alert('請填寫開始時間與日程名稱！');
+            return;
+        }
+
+        if (!db.schedules[selectedDateStr]) db.schedules[selectedDateStr] = [];
+
+        db.schedules[selectedDateStr].push({
+            id: Date.now(),
+            startTime,
+            endTime: endTime || startTime,
+            title
+        });
+
+        // 按開始時間排序
+        db.schedules[selectedDateStr].sort((a, b) => a.startTime.localeCompare(b.startTime));
+
+        saveData();
+        renderSchedules();
+        document.getElementById('schedule-title').value = '';
+    }
+
+    function deleteSchedule(id) {
+        db.schedules[selectedDateStr] = db.schedules[selectedDateStr].filter(item => item.id !== id);
+        saveData();
+        renderSchedules();
+    }
+
+    function renderSchedules() {
+        const list = document.getElementById('schedule-list');
+        list.innerHTML = '';
+        const items = db.schedules[selectedDateStr] || [];
+
+        if (items.length === 0) {
+            list.innerHTML = `<li class="item-row" style="color:#94a3b8;">當日無日程紀錄</li>`;
+            return;
+        }
+
+        items.forEach(item => {
+            const timeText = item.endTime && item.endTime !== item.startTime 
+                ? `${item.startTime} - ${item.endTime}` 
+                : item.startTime;
+                
+            list.innerHTML += `
+                <li class="item-row">
+                    <div>
+                        <span class="item-time">[${timeText}]</span>
+                        <span>${escapeHtml(item.title)}</span>
+                    </div>
+                    <button class="danger" onclick="deleteSchedule(${item.id})">刪除</button>
+                </li>
+            `;
+        });
+    }
+
+    // 3. 收支計算器邏輯
+    function addExpense() {
+        const time = document.getElementById('expense-time').value;
+        const type = document.getElementById('expense-type').value;
+        const amount = parseFloat(document.getElementById('expense-amount').value);
+        const note = document.getElementById('expense-note').value.trim();
+
+        if (!time || isNaN(amount) || amount <= 0) {
+            alert('請輸入正確的時間與金額！');
+            return;
+        }
+
+        if (!db.expenses[selectedDateStr]) db.expenses[selectedDateStr] = [];
+
+        db.expenses[selectedDateStr].push({
+            id: Date.now(),
+            time,
+            type,
+            amount,
+            note: note || (type === 'income' ? '收入' : '支出')
+        });
+
+        // 按時間排序
+        db.expenses[selectedDateStr].sort((a, b) => a.time.localeCompare(b.time));
+
+        saveData();
+        renderExpenses();
+        document.getElementById('expense-amount').value = '';
+        document.getElementById('expense-note').value = '';
+    }
+
+    function deleteExpense(id) {
+        db.expenses[selectedDateStr] = db.expenses[selectedDateStr].filter(item => item.id !== id);
+        saveData();
+        renderExpenses();
+    }
+
+    function renderExpenses() {
+        const list = document.getElementById('expense-list');
+        list.innerHTML = '';
+        const items = db.expenses[selectedDateStr] || [];
+
+        let totalIncome = 0;
+        let totalExpense = 0;
+
+        if (items.length === 0) {
+            list.innerHTML = `<li class="item-row" style="color:#94a3b8;">當日無收支紀錄</li>`;
+        } else {
+            items.forEach(item => {
+                if (item.type === 'income') totalIncome += item.amount;
+                else totalExpense += item.amount;
+
+                const isIncome = item.type === 'income';
+                const amountClass = isIncome ? 'amount-income' : 'amount-expense';
+                const sign = isIncome ? '+' : '-';
+
+                list.innerHTML += `
+                    <li class="item-row">
+                        <div>
+                            <span class="item-time">${item.time}</span>
+                            <span>${escapeHtml(item.note)}</span>
+                        </div>
+                        <div>
+                            <span class="${amountClass}" style="margin-right:10px;">${sign}$${item.amount.toFixed(1)}</span>
+                            <button class="danger" onclick="deleteExpense(${item.id})">刪除</button>
+                        </div>
+                    </li>
+                `;
+            });
+        }
+
+        // 更新統計數據
+        document.getElementById('total-income').innerText = `$${totalIncome.toFixed(1)}`;
+        document.getElementById('total-expense').innerText = `$${totalExpense.toFixed(1)}`;
+        
+        const balance = totalIncome - totalExpense;
+        const balanceEl = document.getElementById('total-balance');
+        balanceEl.innerText = `$${balance.toFixed(1)}`;
+        balanceEl.className = balance >= 0 ? 'amount-income' : 'amount-expense';
+    }
+
+    function escapeHtml(text) {
+        return text.replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[m]));
+    }
+</script>
+
+</body>
+</html>
